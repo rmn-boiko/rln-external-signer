@@ -1,0 +1,14 @@
+# Rust build output
+/target
+**/target
+
+# rustfmt backups
+**/*.rs.bk
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+
+# OS files
+.DS_Store
