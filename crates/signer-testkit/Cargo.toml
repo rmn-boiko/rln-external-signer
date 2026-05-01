@@ -1,0 +1,8 @@
+[package]
+name = "signer-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+signer-contract = { path = "../signer-contract" }

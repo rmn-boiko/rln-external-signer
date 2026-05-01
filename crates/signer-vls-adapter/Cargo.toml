@@ -1,0 +1,29 @@
+[package]
+name = "signer-vls-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["without-vls"]
+with-vls = [
+    "dep:vls-protocol-client",
+    "dep:vls-protocol",
+    "dep:vls-protocol-signer",
+    "dep:lightning-signer",
+]
+without-vls = []
+
+[dependencies]
+thiserror.workspace = true
+signer-contract = { path = "../signer-contract" }
+bitcoin = "0.32"
+hex = "0.4"
+serde.workspace = true
+serde_json = "1"
+base64 = "0.22"
+tracing = "0.1"
+vls-protocol-client = { version = "0.14.0", optional = true }
+vls-protocol = { version = "0.14.0", optional = true }
+vls-protocol-signer = { version = "0.14.0", optional = true }
+lightning-signer = { package = "vls-core", version = "0.14.0", optional = true }

@@ -1,0 +1,24 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mode: [without-vls, with-vls]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check workspace (without-vls)
+        if: matrix.mode == 'without-vls'
+        run: |
+          cargo check --manifest-path signer-external/Cargo.toml
+          cargo test --manifest-path signer-external/Cargo.toml
+      - name: Check workspace (with-vls)
+        if: matrix.mode == 'with-vls'
+        run: |
+          cargo check --manifest-path signer-external/Cargo.toml --no-default-features --features with-vls
+          cargo test --manifest-path signer-external/Cargo.toml --no-default-features --features with-vls
