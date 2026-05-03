@@ -1,4 +1,4 @@
-use signer_contract::{ExternalSignerBackend, SignerError, SignerRequest, SignerResponse};
+use crate::contract::{ExternalSignerBackend, SignerError, SignerRequest, SignerResponse};
 
 pub struct NativeSignerAdapter;
 

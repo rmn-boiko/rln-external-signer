@@ -1,4 +1,4 @@
-use signer_contract::{
+use crate::contract::{
     BootstrapData, ChannelOp, ChannelPublicKeys, ChannelRequest, ChannelResponse,
     DebugDerivedAddress, ExternalSignerBackend, NodeRequest, NodeResponse, SignerError,
     SignerRequest, SignerResponse, WalletInputMetadata,
@@ -1762,7 +1762,7 @@ impl<C: VlsClient> ExternalSignerBackend for VlsSignerAdapter<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signer_contract::SignerIdentity;
+    use crate::contract::SignerIdentity;
 
     struct FakeClient;
 

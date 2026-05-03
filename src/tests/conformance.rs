@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use signer_contract::{
+    use crate::contract::{
         ChannelRequest, ChannelResponse, ExternalSignerBackend, NodeRequest, NodeResponse,
         SignerIdentity, SignerRequest, SignerResponse,
     };
-    use signer_testkit::InMemorySigner;
+    use crate::test_utils::InMemorySigner;
 
     fn make_signer() -> InMemorySigner {
         InMemorySigner {

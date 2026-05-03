@@ -1,4 +1,4 @@
-use signer_contract::{
+use crate::contract::{
     BootstrapData, ChannelPublicKeys, ChannelRequest, ChannelResponse, ExternalSignerBackend,
     NodeRequest, NodeResponse, SignerError, SignerIdentity, SignerRequest, SignerResponse,
 };

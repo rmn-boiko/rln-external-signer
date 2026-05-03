@@ -807,9 +807,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with"
-version = "3.18.0"
+version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd5414fad8e6907dbdd5bc441a50ae8d6e26151a03b1de04d89a5576de61d01f"
+checksum = "f05839ce67618e14a09b286535c0d9c94e85ef25469b0e13cb4f844e5593eb19"
 dependencies = [
  "base64",
  "chrono",
@@ -822,9 +822,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with_macros"
-version = "3.18.0"
+version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3db8978e608f1fe7357e211969fd9abdcae80bac1ba7a3369bb7eb6b404eb65"
+checksum = "cf2ebbe86054f9b45bc3881e865683ccfaccce97b9b4cb53f3039d67f355a334"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -839,37 +839,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
-name = "signer-conformance"
-version = "0.1.0-alpha"
-dependencies = [
- "signer-contract",
- "signer-testkit",
-]
-
-[[package]]
-name = "signer-contract"
-version = "0.1.0-alpha"
-dependencies = [
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "signer-native-core"
-version = "0.1.0-alpha"
-dependencies = [
- "signer-contract",
-]
-
-[[package]]
-name = "signer-testkit"
-version = "0.1.0-alpha"
-dependencies = [
- "signer-contract",
-]
-
-[[package]]
-name = "signer-vls-adapter"
+name = "signer-external"
 version = "0.1.0-alpha"
 dependencies = [
  "base64",
@@ -877,7 +847,6 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
- "signer-contract",
  "thiserror",
  "tracing",
  "vls-core",
