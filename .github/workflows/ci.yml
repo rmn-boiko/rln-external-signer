@@ -8,17 +8,17 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        mode: [without-vls, with-vls]
+        mode: [default, with-vls]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check workspace (without-vls)
-        if: matrix.mode == 'without-vls'
+      - name: Check crate (default)
+        if: matrix.mode == 'default'
         run: |
-          cargo check --manifest-path signer-external/Cargo.toml
-          cargo test --manifest-path signer-external/Cargo.toml
-      - name: Check workspace (with-vls)
+          cargo check
+          cargo test --no-run
+      - name: Check crate (with-vls)
         if: matrix.mode == 'with-vls'
         run: |
-          cargo check --manifest-path signer-external/Cargo.toml --no-default-features --features with-vls
-          cargo test --manifest-path signer-external/Cargo.toml --no-default-features --features with-vls
+          cargo check --features with-vls
+          cargo test --features with-vls --no-run

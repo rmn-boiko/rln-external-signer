@@ -4,11 +4,8 @@ use crate::contract::{
     SignerRequest, SignerResponse, WalletInputMetadata,
 };
 
-#[cfg(all(feature = "with-vls", feature = "without-vls"))]
-compile_error!("features `with-vls` and `without-vls` are mutually exclusive");
-
-#[cfg(not(any(feature = "with-vls", feature = "without-vls")))]
-compile_error!("enable one backend feature: `with-vls` or `without-vls`");
+#[cfg(feature = "with-vls")]
+use crate::contract::SignerIdentity;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VlsAdapterError {
@@ -800,7 +797,7 @@ pub mod vls_real {
             };
 
             Ok(BootstrapData {
-                identity: signer_contract::SignerIdentity {
+                identity: SignerIdentity {
                     node_id,
                     account_xpub_vanilla: xpub_vanilla,
                     account_xpub_colored: xpub_colored,

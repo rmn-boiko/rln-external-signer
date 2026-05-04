@@ -1,16 +1,51 @@
 # signer-external
 
-External signer workspace for RLN.
+Standalone external-signer crate for RGB Lightning Node.
 
-## Crates
+This repository is intended to be consumed directly as a Cargo dependency.
 
-- `signer-contract`: shared traits, request/response types, errors.
-- `signer-vls-adapter`: VLS-backed backend implementation used by the native UniFFI signer.
-- `signer-native-core`: non-VLS/native backend interfaces.
-- `signer-testkit`: in-memory deterministic backend for tests.
-- `signer-conformance`: shared conformance tests.
+## What it provides
 
-## Current Direction
+- `contract`
+  - request/response types
+  - bootstrap payload
+  - backend trait
+  - signer error types
+- `vls_adapter`
+  - generic adapter from the stable signer contract to a VLS client
+  - `vls_real::RealVlsClient` behind the `with-vls` feature
+- `native_core`
+  - placeholder native backend surface
+- `test_utils`
+  - test helpers used by this crate
 
-The supported RLN integration path is now a native in-process UniFFI signer.
-There is no supported HTTP signer transport in this workspace anymore.
+## Features
+
+- default: no VLS backend enabled
+- `with-vls`
+  - enables the real VLS-backed client implementation
+
+## Cargo usage
+
+Without VLS:
+
+```toml
+[dependencies]
+signer-external = { git = "https://github.com/UTEXO-Protocol/rln-external-signer", default-features = false }
+```
+
+With VLS:
+
+```toml
+[dependencies]
+signer-external = { git = "https://github.com/UTEXO-Protocol/rln-external-signer", default-features = false, features = ["with-vls"] }
+```
+
+## Local checks
+
+```bash
+cargo check
+cargo test --no-run
+cargo check --features with-vls
+cargo test --features with-vls --no-run
+```

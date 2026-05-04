@@ -3,16 +3,19 @@ name = "signer-external"
 edition = "2021"
 license = "MIT"
 version = "0.1.0-alpha"
+description = "External signer contract and VLS-backed adapter for RGB Lightning Node"
+repository = "https://github.com/UTEXO-Protocol/rln-external-signer"
+readme = "README.md"
+rust-version = "1.88.0"
 
 [features]
-default = ["without-vls"]
+default = []
 with-vls = [
     "dep:vls-protocol-client",
     "dep:vls-protocol",
     "dep:vls-protocol-signer",
     "dep:lightning-signer",
 ]
-without-vls = []
 
 [dependencies]
 thiserror = "2"
