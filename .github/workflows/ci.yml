@@ -1,0 +1,24 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mode: [default, with-vls]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check crate (default)
+        if: matrix.mode == 'default'
+        run: |
+          cargo check
+          cargo test --no-run
+      - name: Check crate (with-vls)
+        if: matrix.mode == 'with-vls'
+        run: |
+          cargo check --features with-vls
+          cargo test --features with-vls --no-run
