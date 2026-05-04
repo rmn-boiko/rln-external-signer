@@ -2,6 +2,7 @@ use crate::contract::{
     BootstrapData, ChannelPublicKeys, ChannelRequest, ChannelResponse, ExternalSignerBackend,
     NodeRequest, NodeResponse, SignerError, SignerIdentity, SignerRequest, SignerResponse,
 };
+use crate::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes;
 
 pub struct InMemorySigner {
     pub identity: SignerIdentity,
@@ -23,14 +24,31 @@ impl InMemorySigner {
     }
 }
 
+fn testkit_ldk_aux_hexes() -> (String, String, String) {
+    let seed = [1u8; 32];
+    let (a, b, c) = derive_ldk_keys_manager_auxiliary_secret_bytes(&seed).expect("derive");
+    (hex::encode(a), hex::encode(b), hex::encode(c))
+}
+
 impl ExternalSignerBackend for InMemorySigner {
     fn call(&self, req: SignerRequest) -> Result<SignerResponse, SignerError> {
         match req {
-            SignerRequest::Bootstrap => Ok(SignerResponse::Bootstrap(BootstrapData {
-                identity: self.identity.clone(),
-                protocol_version: "v1-testkit".to_string(),
-                api_level: 1,
-            })),
+            SignerRequest::Bootstrap => {
+                let (
+                    ldk_inbound_payment_key_hex,
+                    ldk_peer_storage_key_hex,
+                    ldk_receive_auth_key_hex,
+                ) = testkit_ldk_aux_hexes();
+                Ok(SignerResponse::Bootstrap(BootstrapData {
+                    identity: self.identity.clone(),
+                    protocol_version: "v1-testkit".to_string(),
+                    api_level: 1,
+                    ldk_inbound_payment_key_hex,
+                    ldk_peer_storage_key_hex,
+                    ldk_receive_auth_key_hex,
+                    async_payments_root_seed_hex: hex::encode([1u8; 32]),
+                }))
+            }
             SignerRequest::Node(node_req) => match node_req {
                 NodeRequest::GetNodeId { .. } => Ok(SignerResponse::Node(NodeResponse::NodeId {
                     node_id_hex: self.identity.node_id.clone(),
@@ -119,8 +137,8 @@ impl ExternalSignerBackend for InMemorySigner {
                     }))
                 }
             },
-            SignerRequest::SignSpendableOutputsPsbt { descriptors, psbt } => {
-                let marker = format!("signed:{}:{}", descriptors.len(), psbt);
+            SignerRequest::SignSpendableOutputsPsbt { utxos, psbt } => {
+                let marker = format!("signed:{}:{}", utxos.len(), psbt);
                 Ok(SignerResponse::SignedPsbt { psbt: marker })
             }
             SignerRequest::SignRgbPsbt { descriptors, psbt } => Ok(SignerResponse::SignedPsbt {

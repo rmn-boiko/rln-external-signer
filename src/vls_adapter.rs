@@ -1,7 +1,7 @@
 use crate::contract::{
     BootstrapData, ChannelOp, ChannelPublicKeys, ChannelRequest, ChannelResponse,
     DebugDerivedAddress, ExternalSignerBackend, NodeRequest, NodeResponse, SignerError,
-    SignerRequest, SignerResponse, WalletInputMetadata,
+    SignerRequest, SignerResponse, SpendableOutputUtxo, WalletInputMetadata,
 };
 
 #[cfg(feature = "with-vls")]
@@ -86,7 +86,7 @@ pub trait VlsClient: Send + Sync {
 
     fn sign_spendable_outputs_psbt(
         &self,
-        descriptors: Vec<String>,
+        utxos: Vec<SpendableOutputUtxo>,
         psbt: String,
     ) -> Result<String, VlsAdapterError>;
 
@@ -114,6 +114,7 @@ pub trait VlsClient: Send + Sync {
 #[cfg(feature = "with-vls")]
 pub mod vls_real {
     use super::*;
+    use crate::contract::SpendableOutputUtxo;
     use base64::Engine;
     use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
     use bitcoin::psbt::Psbt;
@@ -176,6 +177,29 @@ pub mod vls_real {
         script_hex: String,
         #[serde(default)]
         is_in_coinbase: bool,
+    }
+
+    fn spendable_utxo_to_vls_model(u: SpendableOutputUtxo) -> Result<Utxo, VlsAdapterError> {
+        let txid = Txid::from_str(&u.txid_hex).map_err(|e| {
+            VlsAdapterError::Protocol(format!("invalid spendable utxo txid_hex: {e}"))
+        })?;
+        let script = if u.script_pubkey_hex.is_empty() {
+            Octets::EMPTY
+        } else {
+            Octets(hex::decode(&u.script_pubkey_hex).map_err(|e| {
+                VlsAdapterError::Protocol(format!("invalid spendable utxo script_pubkey_hex: {e}"))
+            })?)
+        };
+        Ok(Utxo {
+            txid,
+            outnum: u.vout,
+            amount: u.amount_sat,
+            keyindex: u.keyindex,
+            is_p2sh: u.is_p2sh,
+            script,
+            close_info: None,
+            is_in_coinbase: u.is_in_coinbase,
+        })
     }
 
     /// Real VLS-backed client shell.
@@ -796,6 +820,22 @@ pub mod vls_real {
                 )
             };
 
+            let seed = self.seed.ok_or_else(|| {
+                VlsAdapterError::Protocol(
+                    "RealVlsClient requires Some(seed) in new_with_network_and_seed so bootstrap can export LDK inbound/peer_storage/receive_auth key material".into(),
+                )
+            })?;
+            let (a, b, c) =
+                crate::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes(
+                    &seed,
+                )
+                .map_err(|e| {
+                    VlsAdapterError::Protocol(format!("derive LDK auxiliary keys: {e}"))
+                })?;
+            let ldk_inbound_payment_key_hex = hex::encode(a);
+            let ldk_peer_storage_key_hex = hex::encode(b);
+            let ldk_receive_auth_key_hex = hex::encode(c);
+
             Ok(BootstrapData {
                 identity: SignerIdentity {
                     node_id,
@@ -805,6 +845,10 @@ pub mod vls_real {
                 },
                 protocol_version: "vls-protocol/0.14".to_string(),
                 api_level: 1,
+                ldk_inbound_payment_key_hex,
+                ldk_peer_storage_key_hex,
+                ldk_receive_auth_key_hex,
+                async_payments_root_seed_hex: hex::encode(seed),
             })
         }
 
@@ -1304,37 +1348,12 @@ pub mod vls_real {
 
         fn sign_spendable_outputs_psbt(
             &self,
-            descriptors: Vec<String>,
+            spendable_utxos: Vec<SpendableOutputUtxo>,
             psbt: String,
         ) -> Result<String, VlsAdapterError> {
-            let utxos: Vec<Utxo> = descriptors
+            let utxos: Vec<Utxo> = spendable_utxos
                 .into_iter()
-                .map(|desc| {
-                    let parsed: WithdrawalUtxo = serde_json::from_str(&desc).map_err(|e| {
-                        VlsAdapterError::Protocol(format!("invalid descriptor json: {e}"))
-                    })?;
-                    let txid = Txid::from_str(&parsed.txid).map_err(|e| {
-                        VlsAdapterError::Protocol(format!("invalid descriptor txid: {e}"))
-                    })?;
-                    let script = if parsed.script_hex.is_empty() {
-                        Octets::EMPTY
-                    } else {
-                        Octets(hex::decode(parsed.script_hex).map_err(|e| {
-                            VlsAdapterError::Protocol(format!("invalid descriptor script_hex: {e}"))
-                        })?)
-                    };
-
-                    Ok(Utxo {
-                        txid,
-                        outnum: parsed.outnum,
-                        amount: parsed.amount,
-                        keyindex: parsed.keyindex,
-                        is_p2sh: parsed.is_p2sh,
-                        script,
-                        close_info: None,
-                        is_in_coinbase: parsed.is_in_coinbase,
-                    })
-                })
+                .map(spendable_utxo_to_vls_model)
                 .collect::<Result<Vec<_>, VlsAdapterError>>()?;
 
             let psbt_bytes = match base64::engine::general_purpose::STANDARD.decode(&psbt) {
@@ -1723,9 +1742,9 @@ impl<C: VlsClient> ExternalSignerBackend for VlsSignerAdapter<C> {
                     .map_err(Into::into),
             },
 
-            SignerRequest::SignSpendableOutputsPsbt { descriptors, psbt } => self
+            SignerRequest::SignSpendableOutputsPsbt { utxos, psbt } => self
                 .client
-                .sign_spendable_outputs_psbt(descriptors, psbt)
+                .sign_spendable_outputs_psbt(utxos, psbt)
                 .map(|psbt| SignerResponse::SignedPsbt { psbt })
                 .map_err(Into::into),
 
@@ -1765,6 +1784,12 @@ mod tests {
 
     impl VlsClient for FakeClient {
         fn bootstrap(&self) -> Result<BootstrapData, VlsAdapterError> {
+            let seed = [9u8; 32];
+            let (a, b, c) =
+                crate::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes(
+                    &seed,
+                )
+                .map_err(|e| VlsAdapterError::Protocol(format!("derive test aux keys: {e}")))?;
             Ok(BootstrapData {
                 identity: SignerIdentity {
                     node_id: "n1".to_string(),
@@ -1774,6 +1799,10 @@ mod tests {
                 },
                 protocol_version: "vls-test".to_string(),
                 api_level: 1,
+                ldk_inbound_payment_key_hex: hex::encode(a),
+                ldk_peer_storage_key_hex: hex::encode(b),
+                ldk_receive_auth_key_hex: hex::encode(c),
+                async_payments_root_seed_hex: hex::encode(seed),
             })
         }
 
@@ -1881,10 +1910,10 @@ mod tests {
 
         fn sign_spendable_outputs_psbt(
             &self,
-            descriptors: Vec<String>,
+            utxos: Vec<SpendableOutputUtxo>,
             psbt: String,
         ) -> Result<String, VlsAdapterError> {
-            Ok(format!("signed:{}:{psbt}", descriptors.len()))
+            Ok(format!("signed:{}:{psbt}", utxos.len()))
         }
 
         fn sign_rgb_psbt(
