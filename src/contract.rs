@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_bootstrap_api_level() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignerIdentity {
     pub node_id: String,
@@ -12,7 +16,22 @@ pub struct SignerIdentity {
 pub struct BootstrapData {
     pub identity: SignerIdentity,
     pub protocol_version: String,
+    /// External signer wire/bootstrap compatibility. RLN currently requires **`1`** (matches
+    /// `rgb_lightning_node::signer::SUPPORTED_SIGNER_API_LEVEL`). Hosts must send this value in
+    /// bootstrap until a future level is defined.
+    #[serde(default = "default_bootstrap_api_level")]
     pub api_level: u32,
+    /// 32-byte secret as 64 hex chars: LDK inbound payment key material (`ExpandedKey::new`).
+    pub ldk_inbound_payment_key_hex: String,
+    /// 32-byte secret as 64 hex chars: LDK peer storage encryption key inner bytes.
+    pub ldk_peer_storage_key_hex: String,
+    /// 32-byte secret as 64 hex chars: LDK receive-auth key bytes.
+    pub ldk_receive_auth_key_hex: String,
+    /// When non-empty, 64 hex chars (32 bytes): same secret the host uses as the LDK / VLS node seed
+    /// for channel keys; used for [`AsyncPaymentsPreimageRoot::build_from_seed`]. When empty, the
+    /// node falls back to a legacy deterministic derivation from public bootstrap identity.
+    #[serde(default)]
+    pub async_payments_root_seed_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -21,6 +40,22 @@ pub struct WalletInputMetadata {
     pub amount_sat: u64,
     pub script_pubkey_hex: String,
     pub is_p2sh: bool,
+}
+
+/// UTXO metadata for [`SignerRequest::SignSpendableOutputsPsbt`] (LDK spendable outputs → VLS withdrawal).
+/// Carried as protobuf sub-messages on the signer wire, not JSON.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpendableOutputUtxo {
+    pub txid_hex: String,
+    pub vout: u32,
+    pub amount_sat: u64,
+    pub keyindex: u32,
+    #[serde(default)]
+    pub is_p2sh: bool,
+    #[serde(default)]
+    pub script_pubkey_hex: String,
+    #[serde(default)]
+    pub is_in_coinbase: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,7 +72,7 @@ pub enum SignerRequest {
     Node(NodeRequest),
     Channel(ChannelRequest),
     SignSpendableOutputsPsbt {
-        descriptors: Vec<String>,
+        utxos: Vec<SpendableOutputUtxo>,
         psbt: String,
     },
     SignRgbPsbt {
