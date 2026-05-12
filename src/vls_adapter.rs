@@ -111,12 +111,21 @@ pub trait VlsClient: Send + Sync {
     ) -> Result<Vec<DebugDerivedAddress>, VlsAdapterError>;
 }
 
+/// VLS wire mapping: `crate::contract::ChannelOp` → `vls-protocol` messages.
+///
+/// **Holder commitment** (`ChannelOp::ValidateHolderCommitment`):
+/// - If `commitment_unsigned_tx_hex` is missing, empty, or whitespace only → **`ValidateCommitmentTx2`**
+///   (LDK summary fields only).
+/// - Otherwise → try **`ValidateCommitmentTx`** on the wire transaction; if VLS rejects it (for
+///   example unsigned P2WSH outputs without embedded `witness_script` in the PSBT), fall back to
+///   **`ValidateCommitmentTx2`** so native external signers still enforce balances on RGB channels.
 #[cfg(feature = "with-vls")]
 pub mod vls_real {
     use super::*;
     use crate::contract::SpendableOutputUtxo;
     use base64::Engine;
     use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
+    use bitcoin::consensus::deserialize as consensus_deserialize_tx;
     use bitcoin::psbt::Psbt;
     use bitcoin::secp256k1::ecdsa::Signature;
     use bitcoin::secp256k1::Secp256k1;
@@ -124,7 +133,10 @@ pub mod vls_real {
     use bitcoin::Network;
     use bitcoin::Txid;
     use bitcoin::{Address, CompressedPublicKey, ScriptBuf};
-    use lightning_signer::channel::CommitmentType;
+    use lightning_signer::channel::{ChannelId, CommitmentType};
+    use lightning_signer::lightning::sign::{ChannelSigner as _, SignerProvider};
+    use lightning_signer::signer::my_keys_manager::MyKeysManager;
+    use lightning_signer::signer::{derive::KeyDerivationStyle, ClockStartingTimeFactory};
     use serde::{Deserialize, Serialize};
     use std::str::FromStr;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -136,11 +148,12 @@ pub mod vls_real {
         HsmdInit2Reply, NewChannel, NewChannelReply, SetupChannel, SetupChannelReply,
         SignCommitmentTxReply, SignCommitmentTxWithHtlcsReply, SignGossipMessage,
         SignGossipMessageReply, SignInvoice, SignInvoiceReply, SignLocalCommitmentTx2, SignMessage,
-        SignMessageReply, SignRemoteCommitmentTx2, SignWithdrawal, SignWithdrawalReply,
-        ValidateCommitmentTx2, ValidateCommitmentTxReply,
+        SignMessageReply, SignRemoteCommitmentTx, SignRemoteCommitmentTx2,
+        SignWithdrawal, SignWithdrawalReply, ValidateCommitmentTx, ValidateCommitmentTx2,
+        ValidateCommitmentTxReply,
     };
-    use vls_protocol::psbt::StreamedPSBT;
-    use vls_protocol::serde_bolt::{Array, Octets, WireString};
+    use vls_protocol::psbt::{PsbtWrapper, StreamedPSBT};
+    use vls_protocol::serde_bolt::{Array, Octets, WireString, WithSize};
     use vls_protocol_client::{call, node_call, Transport};
     use vls_protocol_signer::util::commitment_type_to_channel_type;
 
@@ -247,6 +260,39 @@ pub mod vls_real {
 
         fn default_peer_id() -> [u8; 33] {
             [0u8; 33]
+        }
+
+        fn derive_stub_per_commitment_point(
+            &self,
+            dbid: u64,
+            commitment_number: u64,
+        ) -> Result<Option<String>, VlsAdapterError> {
+            let Some(seed) = self.seed else {
+                return Ok(None);
+            };
+            let network = Network::from_str(self.network()).map_err(|e| {
+                VlsAdapterError::Protocol(format!("invalid network in adapter: {e}"))
+            })?;
+            let channel_id = ChannelId::new_from_peer_id_and_oid(&Self::default_peer_id(), dbid);
+            let starting_time_factory = ClockStartingTimeFactory {};
+            let manager = MyKeysManager::new(
+                KeyDerivationStyle::Ldk,
+                &seed,
+                network,
+                &starting_time_factory,
+            );
+            let signer = manager.derive_channel_signer(0, channel_id.ldk_channel_keys_id());
+            let point = signer
+                .get_per_commitment_point(
+                    Self::LDK_INITIAL_COMMITMENT_NUMBER.saturating_sub(commitment_number),
+                    &Secp256k1::new(),
+                )
+                .map_err(|_| {
+                    VlsAdapterError::Transport(
+                        "failed to synthesize pre-setup commitment point".to_string(),
+                    )
+                })?;
+            Ok(Some(hex::encode(point.serialize())))
         }
 
         fn rgb_coin_type(network: Network, rgb: bool) -> u32 {
@@ -1133,7 +1179,7 @@ pub mod vls_real {
                 }
                 ChannelOp::GetPerCommitmentPoint { idx } => {
                     let commitment_number = Self::LDK_INITIAL_COMMITMENT_NUMBER.saturating_sub(idx);
-                    let reply: GetPerCommitmentPoint2Reply = call(
+                    let reply: Result<GetPerCommitmentPoint2Reply, VlsAdapterError> = call(
                         dbid,
                         PubKey(peer_id),
                         &*self.transport,
@@ -1143,10 +1189,27 @@ pub mod vls_real {
                         VlsAdapterError::Transport(format!(
                             "get_per_commitment_point failed: {e:?}"
                         ))
-                    })?;
-                    Ok(ChannelResponse::PerCommitmentPoint {
-                        point_hex: hex::encode(reply.point.0),
-                    })
+                    });
+                    match reply {
+                        Ok(reply) => Ok(ChannelResponse::PerCommitmentPoint {
+                            point_hex: hex::encode(reply.point.0),
+                        }),
+                        Err(err) => {
+                            if let Some(point_hex) =
+                                self.derive_stub_per_commitment_point(dbid, commitment_number)?
+                            {
+                                tracing::warn!(
+                                    dbid,
+                                    commitment_number,
+                                    error = %err,
+                                    "falling back to synthesized pre-setup commitment point"
+                                );
+                                Ok(ChannelResponse::PerCommitmentPoint { point_hex })
+                            } else {
+                                Err(err)
+                            }
+                        }
+                    }
                 }
                 ChannelOp::ReleaseCommitmentSecret { idx } => {
                     let commitment_number = Self::LDK_INITIAL_COMMITMENT_NUMBER
@@ -1172,6 +1235,7 @@ pub mod vls_real {
                         secret_hex: hex::encode(secret.0),
                     })
                 }
+                // See module doc on `vls_real` for the two-path rule.
                 ChannelOp::ValidateHolderCommitment {
                     commitment_number,
                     feerate_sat_per_kw,
@@ -1180,58 +1244,155 @@ pub mod vls_real {
                     htlcs,
                     counterparty_signature_hex,
                     counterparty_htlc_signatures_hex,
+                    commitment_unsigned_tx_hex,
+                    commitment_psbt_output_witness_scripts_hex,
                 } => {
-                    let htlcs = Array(
-                        htlcs
-                            .into_iter()
-                            .map(|h| {
-                                let payment_hash =
-                                    hex::decode(&h.payment_hash_hex).map_err(|e| {
-                                        VlsAdapterError::Protocol(format!(
-                                            "invalid payment_hash_hex: {e}"
-                                        ))
-                                    })?;
-                                let payment_hash: [u8; 32] =
-                                    payment_hash.try_into().map_err(|_| {
-                                        VlsAdapterError::Protocol(
-                                            "payment_hash must be 32 bytes".to_string(),
-                                        )
-                                    })?;
-                                Ok(vls_protocol::model::Htlc {
-                                    side: h.side,
-                                    amount: h.amount_msat,
-                                    payment_hash: vls_protocol::model::Sha256(payment_hash),
-                                    ctlv_expiry: h.cltv_expiry,
-                                })
+                    let htlc_models: Vec<vls_protocol::model::Htlc> = htlcs
+                        .into_iter()
+                        .map(|h| {
+                            let payment_hash =
+                                hex::decode(&h.payment_hash_hex).map_err(|e| {
+                                    VlsAdapterError::Protocol(format!(
+                                        "invalid payment_hash_hex: {e}"
+                                    ))
+                                })?;
+                            let payment_hash: [u8; 32] =
+                                payment_hash.try_into().map_err(|_| {
+                                    VlsAdapterError::Protocol(
+                                        "payment_hash must be 32 bytes".to_string(),
+                                    )
+                                })?;
+                            Ok(vls_protocol::model::Htlc {
+                                side: h.side,
+                                amount: h.amount_msat,
+                                payment_hash: vls_protocol::model::Sha256(payment_hash),
+                                ctlv_expiry: h.cltv_expiry,
                             })
-                            .collect::<Result<Vec<_>, VlsAdapterError>>()?,
+                        })
+                        .collect::<Result<Vec<_>, VlsAdapterError>>()?;
+                    let htlcs_wire = Array(
+                        htlc_models
+                            .iter()
+                            .map(|h| vls_protocol::model::Htlc {
+                                side: h.side,
+                                amount: h.amount,
+                                payment_hash: h.payment_hash.clone(),
+                                ctlv_expiry: h.ctlv_expiry,
+                            })
+                            .collect::<Vec<_>>(),
                     );
-                    let signature = to_bitcoin_sig(&counterparty_signature_hex)?;
-                    let htlc_signatures = Array(
+                    let htlcs_summary = Array(htlc_models);
+
+                    let signature_wire = to_bitcoin_sig(&counterparty_signature_hex)?;
+                    let signature_summary = to_bitcoin_sig(&counterparty_signature_hex)?;
+                    let htlc_sig_vec: Vec<vls_protocol::model::BitcoinSignature> =
                         counterparty_htlc_signatures_hex
                             .iter()
                             .map(|s| to_bitcoin_sig(s))
-                            .collect::<Result<Vec<_>, VlsAdapterError>>()?,
+                            .collect::<Result<Vec<_>, VlsAdapterError>>()?;
+                    let htlc_signatures_wire = Array(
+                        htlc_sig_vec
+                            .iter()
+                            .map(|s| vls_protocol::model::BitcoinSignature {
+                                signature: s.signature.clone(),
+                                sighash: s.sighash,
+                            })
+                            .collect::<Vec<_>>(),
                     );
-                    let _: ValidateCommitmentTxReply = call(
-                        dbid,
-                        PubKey(peer_id),
-                        &*self.transport,
-                        ValidateCommitmentTx2 {
-                            commitment_number,
-                            feerate: feerate_sat_per_kw,
-                            to_local_value_sat,
-                            to_remote_value_sat,
-                            htlcs,
-                            signature,
-                            htlc_signatures,
-                        },
-                    )
-                    .map_err(|e| {
-                        VlsAdapterError::Transport(format!(
-                            "validate_holder_commitment failed: {e:?}"
-                        ))
-                    })?;
+                    let htlc_signatures_summary = Array(htlc_sig_vec);
+
+                    let wire_validation_ok = if let Some(tx_hex) = commitment_unsigned_tx_hex
+                        .as_ref()
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                    {
+                        let raw = hex::decode(tx_hex).map_err(|e| {
+                            VlsAdapterError::Protocol(format!(
+                                "validate_holder_commitment:rgb_wire_tx:invalid_hex: {e}"
+                            ))
+                        })?;
+                        let tx: bitcoin::Transaction = consensus_deserialize_tx(&raw).map_err(
+                            |e| {
+                                VlsAdapterError::Protocol(format!(
+                                    "validate_holder_commitment:rgb_wire_tx:invalid_consensus_tx: {e}"
+                                ))
+                            },
+                        )?;
+                        let mut psbt = Psbt::from_unsigned_tx(tx.clone()).map_err(|e| {
+                            VlsAdapterError::Protocol(format!(
+                                "validate_holder_commitment:rgb_wire_tx:psbt_from_unsigned_tx: {e}"
+                            ))
+                        })?;
+                        if let Some(wits) = commitment_psbt_output_witness_scripts_hex.as_ref() {
+                            if wits.len() != psbt.outputs.len() {
+                                return Err(VlsAdapterError::Protocol(format!(
+                                    "validate_holder_commitment:rgb_wire_tx:witness_scripts_len {} != psbt.outputs.len {}",
+                                    wits.len(),
+                                    psbt.outputs.len()
+                                )));
+                            }
+                            for (i, wh) in wits.iter().enumerate() {
+                                let t = wh.trim();
+                                if t.is_empty() {
+                                    continue;
+                                }
+                                let bytes = hex::decode(t).map_err(|e| {
+                                    VlsAdapterError::Protocol(format!(
+                                        "validate_holder_commitment:rgb_wire_tx:witness_script_hex[{i}]: {e}"
+                                    ))
+                                })?;
+                                psbt.outputs[i].witness_script =
+                                    Some(ScriptBuf::from_bytes(bytes));
+                            }
+                        }
+                        match call::<ValidateCommitmentTx, ValidateCommitmentTxReply>(
+                            dbid,
+                            PubKey(peer_id),
+                            &*self.transport,
+                            ValidateCommitmentTx {
+                                tx: WithSize(tx),
+                                psbt: WithSize(PsbtWrapper::from(psbt)),
+                                htlcs: htlcs_wire,
+                                commitment_number,
+                                feerate: feerate_sat_per_kw,
+                                signature: signature_wire,
+                                htlc_signatures: htlc_signatures_wire,
+                            },
+                        ) {
+                            Ok(_) => true,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = ?e,
+                                    "VLS ValidateCommitmentTx failed on RGB holder wire tx; using ValidateCommitmentTx2 summary path"
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !wire_validation_ok {
+                        let _: ValidateCommitmentTxReply = call(
+                            dbid,
+                            PubKey(peer_id),
+                            &*self.transport,
+                            ValidateCommitmentTx2 {
+                                commitment_number,
+                                feerate: feerate_sat_per_kw,
+                                to_local_value_sat,
+                                to_remote_value_sat,
+                                htlcs: htlcs_summary,
+                                signature: signature_summary,
+                                htlc_signatures: htlc_signatures_summary,
+                            },
+                        )
+                        .map_err(|e| {
+                            VlsAdapterError::Transport(format!(
+                                "validate_holder_commitment:summary:vls_validate_commitment_tx2: {e:?}"
+                            ))
+                        })?;
+                    }
                     Ok(ChannelResponse::ValidationComplete)
                 }
                 ChannelOp::SignHolderCommitment {
@@ -1251,12 +1412,14 @@ pub mod vls_real {
                     })
                 }
                 ChannelOp::SignCounterpartyCommitment {
+                    tx_hex,
                     remote_per_commitment_point_hex,
                     commitment_number,
                     feerate_sat_per_kw,
                     to_local_value_sat,
                     to_remote_value_sat,
                     htlcs,
+                    commitment_psbt_output_witness_scripts_hex,
                     ..
                 } => {
                     tracing::debug!(
@@ -1277,9 +1440,11 @@ pub mod vls_real {
                                 "remote_per_commitment_point must be 33 bytes".to_string(),
                             )
                         })?;
-                    let htlcs = Array(
+                    // `vls_protocol::serde_bolt::Array` doesn't implement `Clone`, so we rebuild it for
+                    // each signing API call.
+                    let htlcs_tx2 = Array(
                         htlcs
-                            .into_iter()
+                            .iter()
                             .map(|h| {
                                 let payment_hash =
                                     hex::decode(&h.payment_hash_hex).map_err(|e| {
@@ -1302,32 +1467,117 @@ pub mod vls_real {
                             })
                             .collect::<Result<Vec<_>, VlsAdapterError>>()?,
                     );
-                    let reply: SignCommitmentTxWithHtlcsReply = call(
-                        dbid,
-                        PubKey(peer_id),
-                        &*self.transport,
-                        SignRemoteCommitmentTx2 {
-                            remote_per_commitment_point: PubKey(remote_per_commitment_point),
-                            commitment_number,
-                            feerate: feerate_sat_per_kw,
-                            to_local_value_sat,
-                            to_remote_value_sat,
-                            htlcs,
-                        },
-                    )
-                    .map_err(|e| {
-                        VlsAdapterError::Transport(format!(
-                            "sign_counterparty_commitment failed: {e:?}"
-                        ))
-                    })?;
-                    Ok(ChannelResponse::SignatureWithHtlcs {
-                        signature_hex: hex::encode(reply.signature.signature.0),
-                        htlc_signatures_hex: reply
-                            .htlc_signatures
-                            .iter()
-                            .map(|s| hex::encode(s.signature.0))
-                            .collect(),
-                    })
+                    let has_witness_scripts =
+                        commitment_psbt_output_witness_scripts_hex
+                            .as_ref()
+                            .is_some_and(|w| !w.is_empty());
+
+                    // RGB-colored commitments can include extra outputs (e.g. `OP_RETURN`) so the
+                    // wire transaction differs from VLS's vanilla recomposed commitment. Use the
+                    // PSBT / witness-script path (`SignRemoteCommitmentTx`) so the **funding**
+                    // signature is computed over the exact wire transaction. HTLC second-level
+                    // signatures must use the wire commitment txid as well (see
+                    // `InMemorySigner::sign_counterparty_commitment_htlc_signatures` in VLS core).
+                    //
+                    // Without witness scripts, `SignRemoteCommitmentTx2` (summary-only) is used.
+                    if has_witness_scripts {
+                        let raw = hex::decode(tx_hex.trim()).map_err(|e| {
+                            VlsAdapterError::Protocol(format!(
+                                "sign_counterparty_commitment:rgb_wire_tx:invalid_hex: {e}"
+                            ))
+                        })?;
+                        let tx: bitcoin::Transaction =
+                            consensus_deserialize_tx(&raw).map_err(|e| {
+                                VlsAdapterError::Protocol(format!(
+                                    "sign_counterparty_commitment:rgb_wire_tx:invalid_consensus_tx: {e}"
+                                ))
+                            })?;
+                        let mut psbt = Psbt::from_unsigned_tx(tx.clone()).map_err(|e| {
+                            VlsAdapterError::Protocol(format!(
+                                "sign_counterparty_commitment:rgb_wire_tx:psbt_from_unsigned_tx: {e}"
+                            ))
+                        })?;
+
+                        if let Some(wits) = commitment_psbt_output_witness_scripts_hex.as_ref() {
+                            if wits.len() != psbt.outputs.len() {
+                                return Err(VlsAdapterError::Protocol(format!(
+                                    "sign_counterparty_commitment:rgb_wire_tx:witness_scripts_len {} != psbt.outputs.len {}",
+                                    wits.len(),
+                                    psbt.outputs.len()
+                                )));
+                            }
+                            for (i, wh) in wits.iter().enumerate() {
+                                let t = wh.trim();
+                                if t.is_empty() {
+                                    continue;
+                                }
+                                let bytes = hex::decode(t).map_err(|e| {
+                                    VlsAdapterError::Protocol(format!(
+                                        "sign_counterparty_commitment:rgb_wire_tx:witness_script_hex[{i}]: {e}"
+                                    ))
+                                })?;
+                                psbt.outputs[i].witness_script =
+                                    Some(ScriptBuf::from_bytes(bytes));
+                            }
+                        }
+
+                        let reply: SignCommitmentTxWithHtlcsReply = call(
+                            dbid,
+                            PubKey(peer_id),
+                            &*self.transport,
+                            SignRemoteCommitmentTx {
+                                tx: WithSize(tx),
+                                psbt: WithSize(PsbtWrapper::from(psbt)),
+                                remote_funding_key: PubKey(peer_id),
+                                remote_per_commitment_point: PubKey(remote_per_commitment_point),
+                                option_static_remotekey: true,
+                                commitment_number,
+                                htlcs: htlcs_tx2,
+                                feerate: feerate_sat_per_kw,
+                            },
+                        )
+                        .map_err(|e| {
+                            VlsAdapterError::Transport(format!(
+                                "sign_counterparty_commitment:rgb_wire_tx failed: {e:?}"
+                            ))
+                        })?;
+
+                        return Ok(ChannelResponse::SignatureWithHtlcs {
+                            signature_hex: hex::encode(reply.signature.signature.0),
+                            htlc_signatures_hex: reply
+                                .htlc_signatures
+                                .iter()
+                                .map(|s| hex::encode(s.signature.0))
+                                .collect(),
+                        });
+                    } else {
+                        let reply: SignCommitmentTxWithHtlcsReply = call(
+                            dbid,
+                            PubKey(peer_id),
+                            &*self.transport,
+                            SignRemoteCommitmentTx2 {
+                                remote_per_commitment_point: PubKey(remote_per_commitment_point),
+                                commitment_number,
+                                feerate: feerate_sat_per_kw,
+                                to_local_value_sat,
+                                to_remote_value_sat,
+                                htlcs: htlcs_tx2,
+                            },
+                        )
+                        .map_err(|e| {
+                            VlsAdapterError::Transport(format!(
+                                "sign_counterparty_commitment failed: {e:?}"
+                            ))
+                        })?;
+                        Ok(ChannelResponse::SignatureWithHtlcs {
+                            signature_hex: hex::encode(reply.signature.signature.0),
+                            htlc_signatures_hex: reply
+                                .htlc_signatures
+                                .iter()
+                                .map(|s| hex::encode(s.signature.0))
+                                .collect(),
+                        })
+                    }
                 }
                 ChannelOp::SignClosingTransaction { .. }
                 | ChannelOp::SignJusticeRevokedOutput { .. }

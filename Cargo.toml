@@ -28,4 +28,10 @@ tracing = "0.1"
 vls-protocol-client = { version = "0.14.0", optional = true }
 vls-protocol = { version = "0.14.0", optional = true }
 vls-protocol-signer = { version = "0.14.0", optional = true }
-lightning-signer = { package = "vls-core", version = "0.14.0", optional = true }
+lightning-signer = { package = "vls-core", version = "0.14.0", optional = true, features = [
+    "rgb-commitment-compat",
+] }
+
+[patch.crates-io]
+vls-core = { git = "https://github.com/rmn-boiko/vls-core", branch = "feat/rgb-compatibility" }
+vls-protocol-signer = { git = "https://github.com/rmn-boiko/vls-protocol-signer", branch = "feat/rgb-compatibility" }
