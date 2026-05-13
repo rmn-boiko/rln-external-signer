@@ -1,6 +1,6 @@
 use crate::contract::{
     BootstrapData, ChannelOp, ChannelPublicKeys, ChannelRequest, ChannelResponse,
-    DebugDerivedAddress, ExternalSignerBackend, NodeRequest, NodeResponse, SignerError,
+    DerivedAddressMatch, ExternalSignerBackend, NodeRequest, NodeResponse, SignerError,
     SignerRequest, SignerResponse, SpendableOutputUtxo, WalletInputMetadata,
 };
 
@@ -104,11 +104,11 @@ pub trait VlsClient: Send + Sync {
         amount_sat: Option<u64>,
     ) -> Result<Option<WalletInputMetadata>, VlsAdapterError>;
 
-    fn debug_derive_addresses(
+    fn find_derivation_matches(
         &self,
         script_pubkey_hex: String,
         max_index: u32,
-    ) -> Result<Vec<DebugDerivedAddress>, VlsAdapterError>;
+    ) -> Result<Vec<DerivedAddressMatch>, VlsAdapterError>;
 }
 
 /// VLS wire mapping: `crate::contract::ChannelOp` → `vls-protocol` messages.
@@ -148,9 +148,9 @@ pub mod vls_real {
         HsmdInit2Reply, NewChannel, NewChannelReply, SetupChannel, SetupChannelReply,
         SignCommitmentTxReply, SignCommitmentTxWithHtlcsReply, SignGossipMessage,
         SignGossipMessageReply, SignInvoice, SignInvoiceReply, SignLocalCommitmentTx2, SignMessage,
-        SignMessageReply, SignRemoteCommitmentTx, SignRemoteCommitmentTx2,
-        SignWithdrawal, SignWithdrawalReply, ValidateCommitmentTx, ValidateCommitmentTx2,
-        ValidateCommitmentTxReply,
+        SignMessageReply, SignMutualCloseTx, SignRemoteCommitmentTx, SignRemoteCommitmentTx2,
+        SignTxReply, SignWithdrawal, SignWithdrawalReply, ValidateCommitmentTx,
+        ValidateCommitmentTx2, ValidateCommitmentTxReply,
     };
     use vls_protocol::psbt::{PsbtWrapper, StreamedPSBT};
     use vls_protocol::serde_bolt::{Array, Octets, WireString, WithSize};
@@ -389,6 +389,76 @@ pub mod vls_real {
                     *path = Self::normalize_derivation_path(path);
                 }
             }
+        }
+
+        fn mutual_close_wallet_path() -> Result<DerivationPath, VlsAdapterError> {
+            Ok(DerivationPath::from(vec![ChildNumber::from_normal_idx(1)
+                .map_err(|e| {
+                    VlsAdapterError::Protocol(format!("invalid wallet path: {e}"))
+                })?]))
+        }
+
+        fn attach_mutual_close_output_paths(psbt: &mut Psbt) -> Result<(), VlsAdapterError> {
+            let wallet_path = Self::mutual_close_wallet_path()?;
+            let marker_secret = bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32])
+                .map_err(|e| VlsAdapterError::Protocol(format!("invalid marker secret: {e}")))?;
+            let marker_pubkey =
+                bitcoin::secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &marker_secret);
+            for (idx, output) in psbt.outputs.iter_mut().enumerate() {
+                if psbt.unsigned_tx.output[idx].script_pubkey.is_op_return() {
+                    continue;
+                }
+                output.tap_key_origins.clear();
+                output.bip32_derivation.clear();
+                output
+                    .bip32_derivation
+                    .insert(marker_pubkey, (Fingerprint::default(), wallet_path.clone()));
+            }
+            Ok(())
+        }
+
+        fn populate_psbt_witness_utxos(
+            psbt: &mut Psbt,
+            spendable_utxos: &[SpendableOutputUtxo],
+        ) -> Result<(), VlsAdapterError> {
+            for (idx, input) in psbt.inputs.iter_mut().enumerate() {
+                if input.witness_utxo.is_some() {
+                    continue;
+                }
+                let prevout = psbt
+                    .unsigned_tx
+                    .input
+                    .get(idx)
+                    .ok_or_else(|| {
+                        VlsAdapterError::Protocol(format!(
+                            "psbt input index {idx} missing matching unsigned tx input"
+                        ))
+                    })?
+                    .previous_output;
+                let metadata = spendable_utxos
+                    .iter()
+                    .find(|utxo| {
+                        utxo.txid_hex == prevout.txid.to_string() && utxo.vout == prevout.vout
+                    })
+                    .ok_or_else(|| {
+                        VlsAdapterError::Protocol(format!(
+                            "missing spendable metadata for psbt input {}:{}",
+                            prevout.txid, prevout.vout
+                        ))
+                    })?;
+                let script_pubkey =
+                    ScriptBuf::from_hex(&metadata.script_pubkey_hex).map_err(|e| {
+                        VlsAdapterError::Protocol(format!(
+                            "invalid spendable utxo script_pubkey_hex for {}:{}: {e}",
+                            metadata.txid_hex, metadata.vout
+                        ))
+                    })?;
+                input.witness_utxo = Some(bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(metadata.amount_sat),
+                    script_pubkey,
+                });
+            }
+            Ok(())
         }
 
         fn utxos_from_psbt(&self, psbt: &Psbt) -> Result<Vec<Utxo>, VlsAdapterError> {
@@ -651,7 +721,7 @@ pub mod vls_real {
             &self,
             script: &bitcoin::ScriptBuf,
             max_index: u32,
-        ) -> Result<Vec<DebugDerivedAddress>, VlsAdapterError> {
+        ) -> Result<Vec<DerivedAddressMatch>, VlsAdapterError> {
             let bootstrap = self.bootstrap()?;
             let network = Network::from_str(self.network()).map_err(|e| {
                 VlsAdapterError::Protocol(format!("invalid network in adapter: {e}"))
@@ -684,21 +754,21 @@ pub mod vls_real {
                             })?;
                     let one_level_p2wpkh = Address::p2wpkh(&one_level_cpk, network);
                     if one_level_p2wpkh.script_pubkey() == *script {
-                        out.push(DebugDerivedAddress {
+                        out.push(DerivedAddressMatch {
                             keyindex: idx,
                             address: one_level_p2wpkh.to_string(),
-                            derivation: format!("{idx}"),
-                            account: account_name.to_string(),
+                            derivation_path: format!("{idx}"),
+                            account_name: account_name.to_string(),
                         });
                     }
                     let (one_level_xonly, _) = one_level.public_key.x_only_public_key();
                     let one_level_p2tr = Address::p2tr(&secp, one_level_xonly, None, network);
                     if one_level_p2tr.script_pubkey() == *script {
-                        out.push(DebugDerivedAddress {
+                        out.push(DerivedAddressMatch {
                             keyindex: idx,
                             address: one_level_p2tr.to_string(),
-                            derivation: format!("{idx}"),
-                            account: account_name.to_string(),
+                            derivation_path: format!("{idx}"),
+                            account_name: account_name.to_string(),
                         });
                     }
                     for branch in [0u32, 1u32] {
@@ -716,21 +786,21 @@ pub mod vls_real {
                             })?;
                         let p2wpkh = Address::p2wpkh(&cpk, network);
                         if p2wpkh.script_pubkey() == *script {
-                            out.push(DebugDerivedAddress {
+                            out.push(DerivedAddressMatch {
                                 keyindex: idx,
                                 address: p2wpkh.to_string(),
-                                derivation: format!("{branch}/{idx}"),
-                                account: account_name.to_string(),
+                                derivation_path: format!("{branch}/{idx}"),
+                                account_name: account_name.to_string(),
                             });
                         }
                         let (xonly, _) = child.public_key.x_only_public_key();
                         let p2tr = Address::p2tr(&secp, xonly, None, network);
                         if p2tr.script_pubkey() == *script {
-                            out.push(DebugDerivedAddress {
+                            out.push(DerivedAddressMatch {
                                 keyindex: idx,
                                 address: p2tr.to_string(),
-                                derivation: format!("{branch}/{idx}"),
-                                account: account_name.to_string(),
+                                derivation_path: format!("{branch}/{idx}"),
+                                account_name: account_name.to_string(),
                             });
                         }
                     }
@@ -1250,18 +1320,14 @@ pub mod vls_real {
                     let htlc_models: Vec<vls_protocol::model::Htlc> = htlcs
                         .into_iter()
                         .map(|h| {
-                            let payment_hash =
-                                hex::decode(&h.payment_hash_hex).map_err(|e| {
-                                    VlsAdapterError::Protocol(format!(
-                                        "invalid payment_hash_hex: {e}"
-                                    ))
-                                })?;
-                            let payment_hash: [u8; 32] =
-                                payment_hash.try_into().map_err(|_| {
-                                    VlsAdapterError::Protocol(
-                                        "payment_hash must be 32 bytes".to_string(),
-                                    )
-                                })?;
+                            let payment_hash = hex::decode(&h.payment_hash_hex).map_err(|e| {
+                                VlsAdapterError::Protocol(format!("invalid payment_hash_hex: {e}"))
+                            })?;
+                            let payment_hash: [u8; 32] = payment_hash.try_into().map_err(|_| {
+                                VlsAdapterError::Protocol(
+                                    "payment_hash must be 32 bytes".to_string(),
+                                )
+                            })?;
                             Ok(vls_protocol::model::Htlc {
                                 side: h.side,
                                 amount: h.amount_msat,
@@ -1341,8 +1407,7 @@ pub mod vls_real {
                                         "validate_holder_commitment:rgb_wire_tx:witness_script_hex[{i}]: {e}"
                                     ))
                                 })?;
-                                psbt.outputs[i].witness_script =
-                                    Some(ScriptBuf::from_bytes(bytes));
+                                psbt.outputs[i].witness_script = Some(ScriptBuf::from_bytes(bytes));
                             }
                         }
                         match call::<ValidateCommitmentTx, ValidateCommitmentTxReply>(
@@ -1467,10 +1532,9 @@ pub mod vls_real {
                             })
                             .collect::<Result<Vec<_>, VlsAdapterError>>()?,
                     );
-                    let has_witness_scripts =
-                        commitment_psbt_output_witness_scripts_hex
-                            .as_ref()
-                            .is_some_and(|w| !w.is_empty());
+                    let has_witness_scripts = commitment_psbt_output_witness_scripts_hex
+                        .as_ref()
+                        .is_some_and(|w| !w.is_empty());
 
                     // RGB-colored commitments can include extra outputs (e.g. `OP_RETURN`) so the
                     // wire transaction differs from VLS's vanilla recomposed commitment. Use the
@@ -1516,8 +1580,7 @@ pub mod vls_real {
                                         "sign_counterparty_commitment:rgb_wire_tx:witness_script_hex[{i}]: {e}"
                                     ))
                                 })?;
-                                psbt.outputs[i].witness_script =
-                                    Some(ScriptBuf::from_bytes(bytes));
+                                psbt.outputs[i].witness_script = Some(ScriptBuf::from_bytes(bytes));
                             }
                         }
 
@@ -1579,8 +1642,44 @@ pub mod vls_real {
                         })
                     }
                 }
-                ChannelOp::SignClosingTransaction { .. }
-                | ChannelOp::SignJusticeRevokedOutput { .. }
+                ChannelOp::SignClosingTransaction { tx_hex } => {
+                    let raw = hex::decode(tx_hex.trim()).map_err(|e| {
+                        VlsAdapterError::Protocol(format!(
+                            "sign_closing_transaction:invalid_hex: {e}"
+                        ))
+                    })?;
+                    let tx: bitcoin::Transaction = consensus_deserialize_tx(&raw).map_err(|e| {
+                        VlsAdapterError::Protocol(format!(
+                            "sign_closing_transaction:invalid_consensus_tx: {e}"
+                        ))
+                    })?;
+                    let mut psbt = Psbt::from_unsigned_tx(tx.clone()).map_err(|e| {
+                        VlsAdapterError::Protocol(format!(
+                            "sign_closing_transaction:psbt_from_unsigned_tx: {e}"
+                        ))
+                    })?;
+                    Self::attach_mutual_close_output_paths(&mut psbt)?;
+
+                    let reply: SignTxReply = call(
+                        dbid,
+                        PubKey(peer_id),
+                        &*self.transport,
+                        SignMutualCloseTx {
+                            tx: WithSize(tx),
+                            psbt: WithSize(PsbtWrapper::from(psbt)),
+                            remote_funding_key: PubKey(peer_id),
+                        },
+                    )
+                    .map_err(|e| {
+                        VlsAdapterError::Transport(format!(
+                            "sign_closing_transaction failed: {e:?}"
+                        ))
+                    })?;
+                    Ok(ChannelResponse::Signature {
+                        signature_hex: hex::encode(reply.signature.signature.0),
+                    })
+                }
+                ChannelOp::SignJusticeRevokedOutput { .. }
                 | ChannelOp::SignJusticeRevokedHtlc { .. }
                 | ChannelOp::SignHolderHtlcTransaction { .. }
                 | ChannelOp::SignCounterpartyHtlcTransaction { .. }
@@ -1601,7 +1700,8 @@ pub mod vls_real {
             spendable_utxos: Vec<SpendableOutputUtxo>,
             psbt: String,
         ) -> Result<String, VlsAdapterError> {
-            let utxos: Vec<Utxo> = spendable_utxos
+            let witness_utxos = spendable_utxos.clone();
+            let mut utxos: Vec<Utxo> = spendable_utxos
                 .into_iter()
                 .map(spendable_utxo_to_vls_model)
                 .collect::<Result<Vec<_>, VlsAdapterError>>()?;
@@ -1617,19 +1717,24 @@ pub mod vls_real {
             let psbt_obj = Psbt::deserialize(&psbt_bytes)
                 .map_err(|e| VlsAdapterError::Protocol(format!("invalid psbt encoding: {e}")))?;
             let mut psbt_obj = psbt_obj;
+            Self::populate_psbt_witness_utxos(&mut psbt_obj, &witness_utxos)?;
             Self::normalize_psbt_input_key_origins(&mut psbt_obj);
-            let streamed_psbt = StreamedPSBT::new(psbt_obj).into();
+            for (utxo, witness_utxo) in utxos.iter_mut().zip(witness_utxos.iter()) {
+                if witness_utxo.script_pubkey_hex.is_empty() {
+                    continue;
+                }
+                let script = ScriptBuf::from_hex(&witness_utxo.script_pubkey_hex).map_err(|e| {
+                    VlsAdapterError::Protocol(format!(
+                        "invalid spendable utxo script_pubkey_hex for {}:{}: {e}",
+                        witness_utxo.txid_hex, witness_utxo.vout
+                    ))
+                })?;
+                if let Some(keyindex) = self.infer_keyindex_from_script(&script)? {
+                    utxo.keyindex = keyindex;
+                }
+            }
 
-            let reply: SignWithdrawalReply = node_call(
-                &*self.transport,
-                SignWithdrawal {
-                    utxos: Array(utxos),
-                    psbt: streamed_psbt,
-                },
-            )
-            .map_err(|e| VlsAdapterError::Transport(format!("sign_withdrawal failed: {e:?}")))?;
-
-            Ok(base64::engine::general_purpose::STANDARD.encode(reply.psbt.0.inner.serialize()))
+            self.sign_withdrawal_with_utxos(utxos, psbt_obj)
         }
 
         fn sign_rgb_psbt(
@@ -1836,11 +1941,11 @@ pub mod vls_real {
             }))
         }
 
-        fn debug_derive_addresses(
+        fn find_derivation_matches(
             &self,
             script_pubkey_hex: String,
             max_index: u32,
-        ) -> Result<Vec<DebugDerivedAddress>, VlsAdapterError> {
+        ) -> Result<Vec<DerivedAddressMatch>, VlsAdapterError> {
             let script_bytes = hex::decode(&script_pubkey_hex).map_err(|e| {
                 VlsAdapterError::Protocol(format!("invalid script_pubkey_hex: {e}"))
             })?;
@@ -2013,13 +2118,13 @@ impl<C: VlsClient> ExternalSignerBackend for VlsSignerAdapter<C> {
                 .get_wallet_input_metadata(txid_hex, vout, script_pubkey_hex, amount_sat)
                 .map(|metadata| SignerResponse::WalletInputMetadata { metadata })
                 .map_err(Into::into),
-            SignerRequest::DebugDeriveAddresses {
+            SignerRequest::FindDerivationMatches {
                 script_pubkey_hex,
                 max_index,
             } => self
                 .client
-                .debug_derive_addresses(script_pubkey_hex, max_index)
-                .map(|matches| SignerResponse::DebugDeriveAddresses { matches })
+                .find_derivation_matches(script_pubkey_hex, max_index)
+                .map(|matches| SignerResponse::FindDerivationMatches { matches })
                 .map_err(Into::into),
         }
     }
@@ -2184,11 +2289,11 @@ mod tests {
             Ok(None)
         }
 
-        fn debug_derive_addresses(
+        fn find_derivation_matches(
             &self,
             _script_pubkey_hex: String,
             _max_index: u32,
-        ) -> Result<Vec<DebugDerivedAddress>, VlsAdapterError> {
+        ) -> Result<Vec<DerivedAddressMatch>, VlsAdapterError> {
             Ok(Vec::new())
         }
     }

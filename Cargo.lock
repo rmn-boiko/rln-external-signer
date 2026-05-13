@@ -998,7 +998,7 @@ dependencies = [
 [[package]]
 name = "vls-core"
 version = "0.14.0"
-source = "git+https://github.com/rmn-boiko/vls-core?branch=feat%2Frgb-compatibility#7567813b4a9a90349afd05e1efa73134ea31364b"
+source = "git+https://github.com/rmn-boiko/vls-core.git?branch=feat%2Frgb-compatibility#7567813b4a9a90349afd05e1efa73134ea31364b"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1070,7 +1070,7 @@ dependencies = [
 [[package]]
 name = "vls-protocol-signer"
 version = "0.14.0"
-source = "git+https://github.com/rmn-boiko/vls-protocol-signer?branch=feat%2Frgb-compatibility#dddd336fcdf84c4febdd7af8363bda8d1721d893"
+source = "git+https://github.com/rmn-boiko/vls-protocol-signer.git?branch=feat%2Frgb-compatibility#dddd336fcdf84c4febdd7af8363bda8d1721d893"
 dependencies = [
  "bit-vec",
  "log",

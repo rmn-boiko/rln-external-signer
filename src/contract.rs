@@ -59,11 +59,13 @@ pub struct SpendableOutputUtxo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DebugDerivedAddress {
+pub struct DerivedAddressMatch {
     pub keyindex: u32,
     pub address: String,
-    pub derivation: String,
-    pub account: String,
+    #[serde(alias = "derivation")]
+    pub derivation_path: String,
+    #[serde(alias = "account")]
+    pub account_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,7 +87,8 @@ pub enum SignerRequest {
         script_pubkey_hex: Option<String>,
         amount_sat: Option<u64>,
     },
-    DebugDeriveAddresses {
+    #[serde(alias = "DebugDeriveAddresses")]
+    FindDerivationMatches {
         script_pubkey_hex: String,
         max_index: u32,
     },
@@ -331,8 +334,9 @@ pub enum SignerResponse {
     WalletInputMetadata {
         metadata: Option<WalletInputMetadata>,
     },
-    DebugDeriveAddresses {
-        matches: Vec<DebugDerivedAddress>,
+    #[serde(alias = "DebugDeriveAddresses")]
+    FindDerivationMatches {
+        matches: Vec<DerivedAddressMatch>,
     },
 }
 
