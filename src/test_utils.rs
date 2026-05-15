@@ -147,8 +147,8 @@ impl ExternalSignerBackend for InMemorySigner {
             SignerRequest::GetWalletInputMetadata { .. } => {
                 Ok(SignerResponse::WalletInputMetadata { metadata: None })
             }
-            SignerRequest::DebugDeriveAddresses { .. } => {
-                Ok(SignerResponse::DebugDeriveAddresses {
+            SignerRequest::FindDerivationMatches { .. } => {
+                Ok(SignerResponse::FindDerivationMatches {
                     matches: Vec::new(),
                 })
             }

@@ -59,11 +59,13 @@ pub struct SpendableOutputUtxo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DebugDerivedAddress {
+pub struct DerivedAddressMatch {
     pub keyindex: u32,
     pub address: String,
-    pub derivation: String,
-    pub account: String,
+    #[serde(alias = "derivation")]
+    pub derivation_path: String,
+    #[serde(alias = "account")]
+    pub account_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,7 +87,8 @@ pub enum SignerRequest {
         script_pubkey_hex: Option<String>,
         amount_sat: Option<u64>,
     },
-    DebugDeriveAddresses {
+    #[serde(alias = "DebugDeriveAddresses")]
+    FindDerivationMatches {
         script_pubkey_hex: String,
         max_index: u32,
     },
@@ -191,6 +194,13 @@ pub enum ChannelOp {
     ReleaseCommitmentSecret {
         idx: u64,
     },
+    /// Validate counterparty signatures on the holder commitment (LDK / VLS).
+    ///
+    /// - `commitment_unsigned_tx_hex`: when `Some` and non-empty after trimming, **hex-encoded
+    ///   consensus serialization** of the **unsigned** holder commitment transaction. The VLS
+    ///   adapter uses the full-tx protocol message so the signer verifies ECDSA on those bytes
+    ///   (needed when outputs include e.g. RGB `OP_RETURN`). When `None` or omitted in JSON, the
+    ///   adapter uses the summary-only LDK message (`ValidateCommitmentTx2`).
     ValidateHolderCommitment {
         commitment_number: u64,
         feerate_sat_per_kw: u32,
@@ -199,6 +209,13 @@ pub enum ChannelOp {
         htlcs: Vec<ChannelHtlc>,
         counterparty_signature_hex: String,
         counterparty_htlc_signatures_hex: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commitment_unsigned_tx_hex: Option<String>,
+        /// Hex-encoded witness redeem scripts, one per transaction output (aligned with
+        /// `commitment_unsigned_tx_hex` outputs). When set with the wire tx, the VLS adapter fills
+        /// PSBT `witness_script` fields required for P2WSH decode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commitment_psbt_output_witness_scripts_hex: Option<Vec<String>>,
     },
     SignHolderCommitment {
         tx_hex: String,
@@ -213,6 +230,10 @@ pub enum ChannelOp {
         to_remote_value_sat: u64,
         htlcs: Vec<ChannelHtlc>,
         preimages_hex: Vec<String>,
+        /// Hex-encoded witness redeem scripts, one per transaction output (aligned with `tx_hex`
+        /// outputs). Needed when signing RGB-shaped counterparty commitments over the full wire tx.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commitment_psbt_output_witness_scripts_hex: Option<Vec<String>>,
     },
     SignClosingTransaction {
         tx_hex: String,
@@ -313,8 +334,9 @@ pub enum SignerResponse {
     WalletInputMetadata {
         metadata: Option<WalletInputMetadata>,
     },
-    DebugDeriveAddresses {
-        matches: Vec<DebugDerivedAddress>,
+    #[serde(alias = "DebugDeriveAddresses")]
+    FindDerivationMatches {
+        matches: Vec<DerivedAddressMatch>,
     },
 }
 
@@ -330,4 +352,47 @@ pub enum SignerError {
 
 pub trait ExternalSignerBackend: Send + Sync {
     fn call(&self, req: SignerRequest) -> Result<SignerResponse, SignerError>;
+}
+
+#[cfg(test)]
+mod validate_holder_commitment_contract_tests {
+    use super::{ChannelHtlc, ChannelOp};
+
+    #[test]
+    fn validate_holder_commitment_serde_roundtrip_with_and_without_wire_tx_hex() {
+        let op_none = ChannelOp::ValidateHolderCommitment {
+            commitment_number: 7,
+            feerate_sat_per_kw: 253,
+            to_local_value_sat: 10_000,
+            to_remote_value_sat: 20_000,
+            htlcs: vec![],
+            counterparty_signature_hex: "ab".repeat(64),
+            counterparty_htlc_signatures_hex: vec![],
+            commitment_unsigned_tx_hex: None,
+            commitment_psbt_output_witness_scripts_hex: None,
+        };
+        let j = serde_json::to_string(&op_none).unwrap();
+        let back: ChannelOp = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, op_none);
+
+        let op_some = ChannelOp::ValidateHolderCommitment {
+            commitment_number: 8,
+            feerate_sat_per_kw: 1000,
+            to_local_value_sat: 1,
+            to_remote_value_sat: 2,
+            htlcs: vec![ChannelHtlc {
+                side: 0,
+                amount_msat: 3000,
+                payment_hash_hex: "cc".repeat(32),
+                cltv_expiry: 100,
+            }],
+            counterparty_signature_hex: "dd".repeat(64),
+            counterparty_htlc_signatures_hex: vec!["ee".repeat(64)],
+            commitment_unsigned_tx_hex: Some("01000000000100".to_string()),
+            commitment_psbt_output_witness_scripts_hex: None,
+        };
+        let j = serde_json::to_string(&op_some).unwrap();
+        let back: ChannelOp = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, op_some);
+    }
 }

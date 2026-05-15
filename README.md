@@ -14,6 +14,7 @@ This repository is intended to be consumed directly as a Cargo dependency.
 - `vls_adapter`
   - generic adapter from the stable signer contract to a VLS client
   - `vls_real::RealVlsClient` behind the `with-vls` feature
+  - **Holder commitment:** `ChannelOp::ValidateHolderCommitment` maps to **`ValidateCommitmentTx2`** when `commitment_unsigned_tx_hex` is absent or blank; otherwise to **`ValidateCommitmentTx`** (full wire tx + PSBT from `Psbt::from_unsigned_tx`). Protocol errors on the RGB path use the prefix `validate_holder_commitment:rgb_wire_tx:`. Patched **`vls-core`** with **`rgb-commitment-compat`** is required for that branch (see RGB Lightning Node `vendor/vls-core-rgb/UTEXO-RGB-PATCH.md`).
 - `native_core`
   - placeholder native backend surface
 - `test_utils`
