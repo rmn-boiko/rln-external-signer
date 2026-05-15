@@ -35,5 +35,5 @@ lightning-signer = { package = "vls-core", version = "0.14.0", optional = true, 
 ] }
 
 [patch.crates-io]
-vls-core = { git = "https://github.com/rmn-boiko/vls-core.git", branch = "feat/rgb-compatibility" }
-vls-protocol-signer = { git = "https://github.com/rmn-boiko/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
+vls-core = { git = "https://github.com/UTEXO-Protocol/vls-core.git", branch = "feat/rgb-compatibility" }
+vls-protocol-signer = { git = "https://github.com/UTEXO-Protocol/vls-protocol-signer.git", branch = "feat/rgb-compatibility" }
