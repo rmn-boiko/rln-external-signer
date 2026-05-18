@@ -59,6 +59,44 @@ pub struct SpendableOutputUtxo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SpendableDescriptorKind {
+    StaticOutput,
+    StaticPaymentOutput,
+    DelayedPaymentOutput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalletDerivationMatch {
+    pub account_name: String,
+    pub keyindex: u32,
+    pub derivation_path: String,
+}
+
+/// Richer spendable-output signing metadata for
+/// [`SignerRequest::SignSpendableOutputsPsbt`].
+///
+/// This is the forward-looking contract used to fully externalize LDK
+/// spendable-output signing. It carries descriptor classification and optional
+/// wallet/channel context that is currently unavailable in the legacy
+/// [`SpendableOutputUtxo`] shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpendableOutputSignInput {
+    pub descriptor_kind: SpendableDescriptorKind,
+    pub txid_hex: String,
+    pub vout: u32,
+    pub amount_sat: u64,
+    pub script_pubkey_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_keys_id_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_derivation_match: Option<WalletDerivationMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_script_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redeem_script_hex: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DerivedAddressMatch {
     pub keyindex: u32,
     pub address: String,
@@ -74,7 +112,7 @@ pub enum SignerRequest {
     Node(NodeRequest),
     Channel(ChannelRequest),
     SignSpendableOutputsPsbt {
-        utxos: Vec<SpendableOutputUtxo>,
+        inputs: Vec<SpendableOutputSignInput>,
         psbt: String,
     },
     SignRgbPsbt {

@@ -1,7 +1,7 @@
 use crate::contract::{
     BootstrapData, ChannelOp, ChannelPublicKeys, ChannelRequest, ChannelResponse,
     DerivedAddressMatch, ExternalSignerBackend, NodeRequest, NodeResponse, SignerError,
-    SignerRequest, SignerResponse, SpendableOutputUtxo, WalletInputMetadata,
+    SignerRequest, SignerResponse, SpendableOutputSignInput, WalletInputMetadata,
 };
 
 #[cfg(feature = "with-vls")]
@@ -86,7 +86,7 @@ pub trait VlsClient: Send + Sync {
 
     fn sign_spendable_outputs_psbt(
         &self,
-        utxos: Vec<SpendableOutputUtxo>,
+        inputs: Vec<SpendableOutputSignInput>,
         psbt: String,
     ) -> Result<String, VlsAdapterError>;
 
@@ -122,7 +122,7 @@ pub trait VlsClient: Send + Sync {
 #[cfg(feature = "with-vls")]
 pub mod vls_real {
     use super::*;
-    use crate::contract::SpendableOutputUtxo;
+    use crate::contract::{SpendableOutputSignInput, SpendableOutputUtxo};
     use base64::Engine;
     use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
     use bitcoin::consensus::deserialize as consensus_deserialize_tx;
@@ -213,6 +213,22 @@ pub mod vls_real {
             close_info: None,
             is_in_coinbase: u.is_in_coinbase,
         })
+    }
+
+    fn spendable_sign_input_to_legacy_utxo(input: SpendableOutputSignInput) -> SpendableOutputUtxo {
+        SpendableOutputUtxo {
+            txid_hex: input.txid_hex,
+            vout: input.vout,
+            amount_sat: input.amount_sat,
+            keyindex: input
+                .wallet_derivation_match
+                .as_ref()
+                .map(|m| m.keyindex)
+                .unwrap_or(0),
+            is_p2sh: false,
+            script_pubkey_hex: input.script_pubkey_hex,
+            is_in_coinbase: false,
+        }
     }
 
     /// Real VLS-backed client shell.
@@ -1697,9 +1713,13 @@ pub mod vls_real {
 
         fn sign_spendable_outputs_psbt(
             &self,
-            spendable_utxos: Vec<SpendableOutputUtxo>,
+            inputs: Vec<SpendableOutputSignInput>,
             psbt: String,
         ) -> Result<String, VlsAdapterError> {
+            let spendable_utxos: Vec<SpendableOutputUtxo> = inputs
+                .into_iter()
+                .map(spendable_sign_input_to_legacy_utxo)
+                .collect();
             let witness_utxos = spendable_utxos.clone();
             let mut utxos: Vec<Utxo> = spendable_utxos
                 .into_iter()
@@ -1736,7 +1756,6 @@ pub mod vls_real {
 
             self.sign_withdrawal_with_utxos(utxos, psbt_obj)
         }
-
         fn sign_rgb_psbt(
             &self,
             descriptors: Vec<String>,
@@ -2097,9 +2116,9 @@ impl<C: VlsClient> ExternalSignerBackend for VlsSignerAdapter<C> {
                     .map_err(Into::into),
             },
 
-            SignerRequest::SignSpendableOutputsPsbt { utxos, psbt } => self
+            SignerRequest::SignSpendableOutputsPsbt { inputs, psbt } => self
                 .client
-                .sign_spendable_outputs_psbt(utxos, psbt)
+                .sign_spendable_outputs_psbt(inputs, psbt)
                 .map(|psbt| SignerResponse::SignedPsbt { psbt })
                 .map_err(Into::into),
 
@@ -2265,10 +2284,10 @@ mod tests {
 
         fn sign_spendable_outputs_psbt(
             &self,
-            utxos: Vec<SpendableOutputUtxo>,
+            inputs: Vec<SpendableOutputSignInput>,
             psbt: String,
         ) -> Result<String, VlsAdapterError> {
-            Ok(format!("signed:{}:{psbt}", utxos.len()))
+            Ok(format!("signed:{}:{psbt}", inputs.len()))
         }
 
         fn sign_rgb_psbt(

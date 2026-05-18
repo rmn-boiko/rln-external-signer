@@ -2,7 +2,8 @@
 mod tests {
     use crate::contract::{
         ChannelRequest, ChannelResponse, ExternalSignerBackend, NodeRequest, NodeResponse,
-        SignerIdentity, SignerRequest, SignerResponse,
+        SignerIdentity, SignerRequest, SignerResponse, SpendableDescriptorKind,
+        SpendableOutputSignInput, WalletDerivationMatch,
     };
     use crate::test_utils::InMemorySigner;
 
@@ -76,6 +77,35 @@ mod tests {
             .expect("rgb sign");
         match res {
             SignerResponse::SignedPsbt { psbt } => assert_eq!(psbt, "rgb-signed:1:psbt-data"),
+            _ => panic!("unexpected response"),
+        }
+    }
+
+    #[test]
+    fn spendable_output_psbt_signing_returns_marker() {
+        let signer = make_signer();
+        let res = signer
+            .call(SignerRequest::SignSpendableOutputsPsbt {
+                inputs: vec![SpendableOutputSignInput {
+                    descriptor_kind: SpendableDescriptorKind::StaticPaymentOutput,
+                    txid_hex: "11".repeat(32),
+                    vout: 1,
+                    amount_sat: 42_000,
+                    script_pubkey_hex: "0014".to_string(),
+                    channel_keys_id_hex: Some("ab".repeat(32)),
+                    wallet_derivation_match: Some(WalletDerivationMatch {
+                        account_name: "vanilla".to_string(),
+                        keyindex: 7,
+                        derivation_path: "m/84'/1'/0'/0/7".to_string(),
+                    }),
+                    witness_script_hex: None,
+                    redeem_script_hex: None,
+                }],
+                psbt: "psbt-data".to_string(),
+            })
+            .expect("spendable sign");
+        match res {
+            SignerResponse::SignedPsbt { psbt } => assert_eq!(psbt, "signed:1:psbt-data"),
             _ => panic!("unexpected response"),
         }
     }

@@ -137,8 +137,8 @@ impl ExternalSignerBackend for InMemorySigner {
                     }))
                 }
             },
-            SignerRequest::SignSpendableOutputsPsbt { utxos, psbt } => {
-                let marker = format!("signed:{}:{}", utxos.len(), psbt);
+            SignerRequest::SignSpendableOutputsPsbt { inputs, psbt } => {
+                let marker = format!("signed:{}:{}", inputs.len(), psbt);
                 Ok(SignerResponse::SignedPsbt { psbt: marker })
             }
             SignerRequest::SignRgbPsbt { descriptors, psbt } => Ok(SignerResponse::SignedPsbt {
