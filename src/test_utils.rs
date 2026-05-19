@@ -1,6 +1,7 @@
 use crate::contract::{
-    BootstrapData, ChannelPublicKeys, ChannelRequest, ChannelResponse, ExternalSignerBackend,
-    NodeRequest, NodeResponse, SignerError, SignerIdentity, SignerRequest, SignerResponse,
+    AsyncPaymentsHashEntry, BootstrapData, ChannelPublicKeys, ChannelRequest, ChannelResponse,
+    ExternalSignerBackend, NodeRequest, NodeResponse, SignerError, SignerIdentity,
+    SignerRequest, SignerResponse,
 };
 use crate::ldk_keys_manager_material::derive_ldk_keys_manager_auxiliary_secret_bytes;
 
@@ -34,19 +35,10 @@ impl ExternalSignerBackend for InMemorySigner {
     fn call(&self, req: SignerRequest) -> Result<SignerResponse, SignerError> {
         match req {
             SignerRequest::Bootstrap => {
-                let (
-                    ldk_inbound_payment_key_hex,
-                    ldk_peer_storage_key_hex,
-                    ldk_receive_auth_key_hex,
-                ) = testkit_ldk_aux_hexes();
                 Ok(SignerResponse::Bootstrap(BootstrapData {
                     identity: self.identity.clone(),
                     protocol_version: "v1-testkit".to_string(),
                     api_level: 1,
-                    ldk_inbound_payment_key_hex,
-                    ldk_peer_storage_key_hex,
-                    ldk_receive_auth_key_hex,
-                    async_payments_root_seed_hex: hex::encode([1u8; 32]),
                 }))
             }
             SignerRequest::Node(node_req) => match node_req {
@@ -58,6 +50,117 @@ impl ExternalSignerBackend for InMemorySigner {
                         bytes_hex: "00".repeat(32),
                     }))
                 }
+                NodeRequest::EncryptPeerStoragePayload {
+                    plaintext_hex,
+                    random_bytes_hex,
+                } => {
+                    let (_, ldk_peer_storage_key_hex, _) = testkit_ldk_aux_hexes();
+                    let bytes_hex = crate::vls_adapter::encrypt_peer_storage_payload_local(
+                        &ldk_peer_storage_key_hex,
+                        plaintext_hex,
+                        random_bytes_hex,
+                    )
+                    .map_err(SignerError::from)?;
+                    Ok(SignerResponse::Node(NodeResponse::PeerStoragePayload {
+                        bytes_hex,
+                    }))
+                }
+                NodeRequest::DecryptPeerStoragePayload { ciphertext_hex } => {
+                    let (_, ldk_peer_storage_key_hex, _) = testkit_ldk_aux_hexes();
+                    let bytes_hex = crate::vls_adapter::decrypt_peer_storage_payload_local(
+                        &ldk_peer_storage_key_hex,
+                        ciphertext_hex,
+                    )
+                    .map_err(SignerError::from)?;
+                    Ok(SignerResponse::Node(
+                        NodeResponse::DecryptedPeerStoragePayload { bytes_hex },
+                    ))
+                }
+                NodeRequest::EncryptBlindedMessagePayload {
+                    plaintext_hex,
+                    rho_hex,
+                } => {
+                    let (_, _, ldk_receive_auth_key_hex) = testkit_ldk_aux_hexes();
+                    let bytes_hex = crate::vls_adapter::encrypt_blinded_message_payload_local(
+                        &ldk_receive_auth_key_hex,
+                        plaintext_hex,
+                        rho_hex,
+                    )
+                    .map_err(SignerError::from)?;
+                    Ok(SignerResponse::Node(NodeResponse::BlindedMessagePayload {
+                        bytes_hex,
+                    }))
+                }
+                NodeRequest::DecryptBlindedMessagePayload {
+                    ciphertext_hex,
+                    rho_hex,
+                } => {
+                    let (_, _, ldk_receive_auth_key_hex) = testkit_ldk_aux_hexes();
+                    let (bytes_hex, used_aad) =
+                        crate::vls_adapter::decrypt_blinded_message_payload_local(
+                            &ldk_receive_auth_key_hex,
+                            ciphertext_hex,
+                            rho_hex,
+                        )
+                        .map_err(SignerError::from)?;
+                    Ok(SignerResponse::Node(
+                        NodeResponse::DecryptedBlindedMessagePayload { bytes_hex, used_aad },
+                    ))
+                }
+                NodeRequest::GetHmacForOfferKey => {
+                    let (ldk_inbound_payment_key_hex, _, _) = testkit_ldk_aux_hexes();
+                    let (offers_base_key, _) =
+                        crate::vls_adapter::offer_keys_from_inbound_key_hex(&ldk_inbound_payment_key_hex)
+                            .map_err(SignerError::from)?;
+                    Ok(SignerResponse::Node(NodeResponse::HmacForOfferKey {
+                        key_hex: hex::encode(offers_base_key),
+                    }))
+                }
+                NodeRequest::CryptForOffer { bytes_hex, nonce_hex } => {
+                    let (ldk_inbound_payment_key_hex, _, _) = testkit_ldk_aux_hexes();
+                    let bytes_hex = crate::vls_adapter::crypt_for_offer_local(
+                        &ldk_inbound_payment_key_hex,
+                        bytes_hex,
+                        nonce_hex,
+                    )
+                    .map_err(SignerError::from)?;
+                    Ok(SignerResponse::Node(NodeResponse::CryptForOffer { bytes_hex }))
+                }
+                NodeRequest::PrepareAsyncPaymentsHashes {
+                    start_index,
+                    batch_size,
+                    ..
+                } => Ok(SignerResponse::Node(NodeResponse::AsyncPaymentsHashes {
+                    hashes: (0..batch_size as u64)
+                        .map(|offset| AsyncPaymentsHashEntry {
+                            hash_index: start_index + offset,
+                            payment_hash_hex: format!("{:064x}", start_index + offset),
+                        })
+                        .collect(),
+                })),
+                NodeRequest::CreateInboundPayment { .. } => Ok(SignerResponse::Node(
+                    NodeResponse::PaymentHashAndSecret {
+                        payment_hash_hex: "11".repeat(32),
+                        payment_secret_hex: "22".repeat(32),
+                    },
+                )),
+                NodeRequest::CreateInboundPaymentForHash { .. }
+                | NodeRequest::CreateSpontaneousPaymentSecret { .. } => Ok(
+                    SignerResponse::Node(NodeResponse::PaymentSecret {
+                        payment_secret_hex: "22".repeat(32),
+                    }),
+                ),
+                NodeRequest::VerifyInboundPayment { .. } => Ok(SignerResponse::Node(
+                    NodeResponse::VerifyInboundPayment {
+                        payment_preimage_hex: Some("33".repeat(32)),
+                        min_final_cltv_expiry_delta: Some(18),
+                    },
+                )),
+                NodeRequest::GetPaymentPreimage { .. } => Ok(SignerResponse::Node(
+                    NodeResponse::PaymentPreimage {
+                        payment_preimage_hex: "33".repeat(32),
+                    },
+                )),
                 NodeRequest::GetDestinationScript { .. } | NodeRequest::GetShutdownScriptpubkey => {
                     Err(SignerError::Unsupported(
                         "destination/shutdown script ops are not implemented in testkit"

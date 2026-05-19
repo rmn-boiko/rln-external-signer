@@ -21,17 +21,12 @@ pub struct BootstrapData {
     /// bootstrap until a future level is defined.
     #[serde(default = "default_bootstrap_api_level")]
     pub api_level: u32,
-    /// 32-byte secret as 64 hex chars: LDK inbound payment key material (`ExpandedKey::new`).
-    pub ldk_inbound_payment_key_hex: String,
-    /// 32-byte secret as 64 hex chars: LDK peer storage encryption key inner bytes.
-    pub ldk_peer_storage_key_hex: String,
-    /// 32-byte secret as 64 hex chars: LDK receive-auth key bytes.
-    pub ldk_receive_auth_key_hex: String,
-    /// When non-empty, 64 hex chars (32 bytes): same secret the host uses as the LDK / VLS node seed
-    /// for channel keys; used for [`AsyncPaymentsPreimageRoot::build_from_seed`]. When empty, the
-    /// node falls back to a legacy deterministic derivation from public bootstrap identity.
-    #[serde(default)]
-    pub async_payments_root_seed_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AsyncPaymentsHashEntry {
+    pub hash_index: u64,
+    pub payment_hash_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +89,10 @@ pub struct SpendableOutputSignInput {
     pub witness_script_hex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redeem_script_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_commitment_point_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_self_delay: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,6 +141,61 @@ pub enum NodeRequest {
     },
     GetShutdownScriptpubkey,
     GetSecureRandomBytes,
+    EncryptPeerStoragePayload {
+        plaintext_hex: String,
+        random_bytes_hex: String,
+    },
+    DecryptPeerStoragePayload {
+        ciphertext_hex: String,
+    },
+    EncryptBlindedMessagePayload {
+        plaintext_hex: String,
+        rho_hex: String,
+    },
+    DecryptBlindedMessagePayload {
+        ciphertext_hex: String,
+        rho_hex: String,
+    },
+    GetHmacForOfferKey,
+    CryptForOffer {
+        bytes_hex: String,
+        nonce_hex: String,
+    },
+    PrepareAsyncPaymentsHashes {
+        host_node_id_hex: String,
+        start_index: u64,
+        batch_size: u32,
+    },
+    CreateInboundPayment {
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        random_bytes_hex: String,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    },
+    CreateInboundPaymentForHash {
+        payment_hash_hex: String,
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    },
+    CreateSpontaneousPaymentSecret {
+        min_value_msat: Option<u64>,
+        invoice_expiry_delta_secs: u32,
+        current_time: u64,
+        min_final_cltv_expiry_delta: Option<u16>,
+    },
+    VerifyInboundPayment {
+        payment_hash_hex: String,
+        payment_secret_hex: String,
+        total_msat: u64,
+        highest_seen_timestamp: u64,
+    },
+    GetPaymentPreimage {
+        payment_hash_hex: String,
+        payment_secret_hex: String,
+    },
     Ecdh {
         recipient: String,
         other_key: String,
@@ -172,6 +226,42 @@ pub enum NodeResponse {
     },
     RandomBytes {
         bytes_hex: String,
+    },
+    PeerStoragePayload {
+        bytes_hex: String,
+    },
+    DecryptedPeerStoragePayload {
+        bytes_hex: String,
+    },
+    BlindedMessagePayload {
+        bytes_hex: String,
+    },
+    DecryptedBlindedMessagePayload {
+        bytes_hex: String,
+        used_aad: bool,
+    },
+    HmacForOfferKey {
+        key_hex: String,
+    },
+    CryptForOffer {
+        bytes_hex: String,
+    },
+    AsyncPaymentsHashes {
+        hashes: Vec<AsyncPaymentsHashEntry>,
+    },
+    PaymentHashAndSecret {
+        payment_hash_hex: String,
+        payment_secret_hex: String,
+    },
+    PaymentSecret {
+        payment_secret_hex: String,
+    },
+    VerifyInboundPayment {
+        payment_preimage_hex: Option<String>,
+        min_final_cltv_expiry_delta: Option<u16>,
+    },
+    PaymentPreimage {
+        payment_preimage_hex: String,
     },
     Ecdh {
         shared_secret_hex: String,

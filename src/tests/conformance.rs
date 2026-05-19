@@ -100,6 +100,8 @@ mod tests {
                     }),
                     witness_script_hex: None,
                     redeem_script_hex: None,
+                    per_commitment_point_hex: None,
+                    to_self_delay: None,
                 }],
                 psbt: "psbt-data".to_string(),
             })
